@@ -1,3 +1,0 @@
-{
-    "main_prompt": "Create a website for Elias , software developer, a menu bar at the top with icons to click and they link to the About page, Home and contact."
-}

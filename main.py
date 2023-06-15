@@ -5,7 +5,7 @@ import re
 import typer
 from dataclasses import dataclass
 
-openai.api_key = '<YOUR-OPENAI-API-KEY-HERE>'
+openai.api_key = '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'
 
 class AI:
     def __init__(self, **kwargs):
@@ -56,15 +56,16 @@ class DB:
         self.data[key] = val
 
     def read_from_file(self, file_path):
-        #print(f"Reading from {file_path}")
         with open(file_path, 'r') as file:
             self.data.update(json.load(file))
-        #print(f"Loaded data from {file_path}: {self.data}")
-
+    
     def write_to_file(self, file_path):
-        #print(f"Writing to {file_path}")
         with open(file_path, 'w') as file:
             json.dump(self.data, file)
+        
+        with open(file_path.replace('.json', '.txt'), 'w') as file:
+            for key in self.data:
+                file.write(f"{key}: {self.data[key]}\n")
 
 @dataclass
 class DBs:
@@ -92,18 +93,24 @@ def to_files(chat, workspace):
     files = parse_chat(chat)
 
     # Check if the directory exists, and if not, create it
-    if not os.path.exists('output-files'):
-        os.makedirs('output-files')
+    output_dir = 'output-files'
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
 
     # Write all_output.txt to the directory
-    with open(os.path.join('output-files', 'all_output.txt'), 'w') as f:
+    with open(os.path.join(output_dir, 'all_output.txt'), 'w') as f:
         f.write(chat)
 
     for file_name, file_content in files:
         workspace[file_name] = file_content
 
         # Write the file to the directory
-        with open(os.path.join('output-files', file_name), 'w') as f:
+        full_path = os.path.join(output_dir, file_name)
+        
+        # create directory if not exists
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+
+        with open(full_path, 'w') as f:
             f.write(file_content)
 
 
@@ -119,7 +126,7 @@ def clarify(ai: AI, dbs: DBs):
     messages = [ai.fsystem(dbs.identity['qa'])]
     user = dbs.input['main_prompt']
     while True:
-        print(f"User input: {user}")
+        #print(f"User input: {user}")
         messages = ai.next(messages, user)
         #print(f"Received messages: {messages}")
 
