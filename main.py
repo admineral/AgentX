@@ -1,35 +1,80 @@
-import json
 import os
-import openai
 import re
+import json
+import openai
 import typer
 from dataclasses import dataclass
 
-openai.api_key = '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'
+# Best to move the API Key to environment variables for security
+openai.api_key = os.getenv('OPENAI_API_KEY', 'fallback_if_env_var_not_set')
+
+
+class DB:
+    def __init__(self):
+        self.data = {}
+
+    def __getitem__(self, key):
+        return self.data.get(key)
+
+    def __setitem__(self, key, val):
+        self.data[key] = val
+
+
+    def read_from_file(self, file_path):
+        if os.path.getsize(file_path) > 0:  # check if file is not empty
+            with open(file_path, 'r') as file:
+                file_content = file.read()
+                try:
+                    json_content = json.loads(file_content)  # try to parse JSON
+                    self.data.update(json_content)
+                except json.JSONDecodeError:
+                    print(f"File {file_path} does not contain valid JSON.")
+
+    def write_to_file(self, file_path):
+        dir_name = os.path.dirname(file_path)
+        if dir_name:  # only create directory if dir_name is not empty
+            os.makedirs(dir_name, exist_ok=True)  # Creates directory if it doesn't exist
+
+        if file_path.endswith('.json'):
+            with open(file_path, 'w') as file:
+                json.dump(self.data, file)
+        else:  # assume it's a txt file
+            with open(file_path, 'w') as file:
+                for key in self.data:
+                    file.write(f"{key}: {self.data[key]}\n")
+
+
+@dataclass
+class DBs:
+    memory: DB
+    logs: DB
+    identity: DB
+    input: DB
+    workspace: DB
+   
 
 class AI:
-    def __init__(self, **kwargs):
-        self.kwargs = kwargs
+    
+    def __init__(self, model: str, temperature: float):
+        self.kwargs = {
+            'model': model,
+            'temperature': temperature
+        }
+        
 
-    def start(self, system, user):
+    def _compose_message(self, role: str, content: str) -> dict:
+        return {"role": role, "content": content}
+
+    def start(self, system: str, user: str) -> list:
         messages = [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
+            self._compose_message("system", system),
+            self._compose_message("user", user),
         ]
-        #print(f"Starting with messages: {messages}")
         return self.next(messages)
 
-    def fsystem(self, msg):
-        return {"role": "system", "content": msg}
-    
-    def fuser(self, msg):
-        return {"role": "user", "content": msg}
-
-    def next(self, messages: list[dict[str, str]], prompt=None):
+    def next(self, messages: list, dbs: DBs, prompt=None) -> list:
         if prompt:
-            messages = messages + [{"role": "user", "content": prompt}]
-
-        #print(f"Sending these messages to API: {messages}")
+            messages.append(self._compose_message("user", prompt))
 
         response = openai.ChatCompletion.create(
             messages=messages,
@@ -43,78 +88,47 @@ class AI:
             msg = delta.get('content', '')
             print(msg, end="")
             chat.append(msg)
-        return messages + [{"role": "assistant", "content": "".join(chat)}]
 
-class DB:
-    def __init__(self):
-        self.data = {}
+        messages.append(self._compose_message("assistant", "".join(chat)))
 
-    def __getitem__(self, key):
-        return self.data.get(key)
+        return messages
 
-    def __setitem__(self, key, val):
-        self.data[key] = val
 
-    def read_from_file(self, file_path):
-        with open(file_path, 'r') as file:
-            self.data.update(json.load(file))
-    
-    def write_to_file(self, file_path):
-        with open(file_path, 'w') as file:
-            json.dump(self.data, file)
-        
-        with open(file_path.replace('.json', '.txt'), 'w') as file:
-            for key in self.data:
-                file.write(f"{key}: {self.data[key]}\n")
 
-@dataclass
-class DBs:
-    memory: DB
-    logs: DB
-    identity: DB
-    input: DB
-    workspace: DB
 
-def parse_chat(chat):
+
+
+def parse_chat(chat: str) -> list:
     regex = r"```(.*?)```"
     matches = re.finditer(regex, chat, re.DOTALL)
+
     files = []
     for match in matches:
-        path = match.group(1).split("\n")[0]
-        code = match.group(1).split("\n")[1:]
-        code = "\n".join(code)
-        files.append((path, code))
+        path, *code = match.group(1).split("\n")
+        files.append((path, "\n".join(code)))
+
     return files
 
-
-
-def to_files(chat, workspace):
+def to_files(chat: str, workspace: DB):
     workspace['all_output.txt'] = chat
     files = parse_chat(chat)
 
-    # Check if the directory exists, and if not, create it
     output_dir = 'output-files'
-    if not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
 
-    # Write all_output.txt to the directory
     with open(os.path.join(output_dir, 'all_output.txt'), 'w') as f:
         f.write(chat)
 
     for file_name, file_content in files:
         workspace[file_name] = file_content
 
-        # Write the file to the directory
         full_path = os.path.join(output_dir, file_name)
-        
-        # create directory if not exists
         os.makedirs(os.path.dirname(full_path), exist_ok=True)
 
         with open(full_path, 'w') as f:
             f.write(file_content)
 
-
-def setup_sys_prompt(dbs):
+def setup_sys_prompt(dbs: DBs) -> str:
     return dbs.identity['setup'] + '\nUseful to know:\n' + dbs.identity['philosophy']
 
 def run(ai: AI, dbs: DBs):
@@ -123,63 +137,43 @@ def run(ai: AI, dbs: DBs):
     return messages
 
 def clarify(ai: AI, dbs: DBs):
-    messages = [ai.fsystem(dbs.identity['qa'])]
+    messages = [ai._compose_message("system", dbs.identity['qa'])]
     user = dbs.input['main_prompt']
+    end_phrases = ["okay i understood"]  # Add more end phrases as needed
     while True:
-        #print(f"User input: {user}")
-        messages = ai.next(messages, user)
-        #print(f"Received messages: {messages}")
-
-        if messages[-1]['content'].strip().lower() == 'no':
+        messages = ai.next(messages, dbs, user)
+        if messages[-1]['content'].strip().lower() in end_phrases:
+            print("Everything clear.")
             break
-
-        print()
-        user = input('(answer in text, or "q" to move on)\n')
-        print()
-
-        if not user or user == 'q':
+        user = input('\n\n\n(answer in text, or "x" to move on)\n')
+        if not user or user == 'x':
             break
-
         user += (
            '\n\n'
            'Is anything else unclear? If yes, only answer in the form:\n'
             '{remaining unclear areas} remaining questions.\n'
             '{Next question}\n'
-            'If everything is sufficiently clear, only answer "no".'
+            'If everything is sufficiently clear, only answer "okay I understood".'
          )
-
-    #print()
     return messages
 
 def run_clarified(ai: AI, dbs: DBs):
     messages = json.loads(dbs.logs[clarify.__name__])
-    messages = (
-        [
-            ai.fsystem(setup_sys_prompt(dbs)),
-        ] +
-        messages[1:]
-    )
-    messages = ai.next(messages, dbs.identity['use_qa'])
+    messages = [ai._compose_message("system", setup_sys_prompt(dbs))] + messages[1:]
+    messages = ai.next(messages, dbs, dbs.identity['use_qa'])
     to_files(messages[-1]['content'], dbs.workspace)
     return messages
 
-STEPS=[
-    clarify,
-    run_clarified
-]
+STEPS = [clarify, run_clarified]
 
 app = typer.Typer()
 
 @app.command()
 def chat(
-    model: str = "gpt-3.5-turbo",
-    temperature: float = 0.1,
+    model: str = typer.Option("gpt-3.5-turbo", help="The model to be used by the AI."),
+    temperature: float = typer.Option(0.1, help="The temperature setting for the AI.")
 ):
-    ai = AI(
-        model=model,
-        temperature=temperature,
-    )
-
+    ai = AI(model=model, temperature=temperature)
     dbs = DBs(
         memory=DB(),
         logs=DB(),
@@ -188,15 +182,20 @@ def chat(
         identity=DB(),
     )
 
-    # Assuming the existence of input.txt, memory.txt, identity.txt
     dbs.input.read_from_file('input.txt')
     dbs.memory.read_from_file('memory.txt')
     dbs.identity.read_from_file('identity.txt')
 
     for step in STEPS:
-        #print(f"Running step: {step.__name__}")
         messages = step(ai, dbs)
         dbs.logs[step.__name__] = json.dumps(messages)
+
+    # After all steps, write back the memory data to 'memory.txt'
+    dbs.memory.write_to_file('memory.txt')
+
+    # Write the logs data to 'logs.json'
+    dbs.logs.write_to_file('logs.json')
+
 
 if __name__ == "__main__":
     app()
