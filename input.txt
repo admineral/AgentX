@@ -1,3 +1,0 @@
-{
-    "main_prompt": "Create a React-based website for Elias, a software developer. Please ensure that the website is fully responsive and has a professional, clean design.  "
-}

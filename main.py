@@ -1,47 +1,26 @@
 import os
 import re
 import json
+import pathlib
 import openai
 import typer
 from dataclasses import dataclass
 
-# Best to move the API Key to environment variables for security
 openai.api_key = os.getenv('OPENAI_API_KEY', 'fallback_if_env_var_not_set')
 
 
 class DB:
-    def __init__(self):
-        self.data = {}
+    def __init__(self, path):
+        self.path = pathlib.Path(path).absolute()
+        os.makedirs(self.path, exist_ok=True)
 
     def __getitem__(self, key):
-        return self.data.get(key)
+        with open(self.path / key, encoding='utf-8') as f:
+            return f.read()
 
     def __setitem__(self, key, val):
-        self.data[key] = val
-
-
-    def read_from_file(self, file_path):
-        if os.path.getsize(file_path) > 0:  # check if file is not empty
-            with open(file_path, 'r') as file:
-                file_content = file.read()
-                try:
-                    json_content = json.loads(file_content)  # try to parse JSON
-                    self.data.update(json_content)
-                except json.JSONDecodeError:
-                    print(f"File {file_path} does not contain valid JSON.")
-
-    def write_to_file(self, file_path):
-        dir_name = os.path.dirname(file_path)
-        if dir_name:  # only create directory if dir_name is not empty
-            os.makedirs(dir_name, exist_ok=True)  # Creates directory if it doesn't exist
-
-        if file_path.endswith('.json'):
-            with open(file_path, 'w') as file:
-                json.dump(self.data, file)
-        else:  # assume it's a txt file
-            with open(file_path, 'w') as file:
-                for key in self.data:
-                    file.write(f"{key}: {self.data[key]}\n")
+        with open(self.path / key, 'w', encoding='utf-8') as f:
+            f.write(val)
 
 
 @dataclass
@@ -51,16 +30,22 @@ class DBs:
     identity: DB
     input: DB
     workspace: DB
-   
+
 
 class AI:
-    
     def __init__(self, model: str, temperature: float):
         self.kwargs = {
             'model': model,
             'temperature': temperature
         }
-        
+
+        try:
+            openai.Model.retrieve("gpt-4")
+        except openai.error.InvalidRequestError:
+            print("Model gpt-4 not available for provided api key reverting "
+                  "to gpt-3.5.turbo. Sign up for the gpt-4 wait list here: "
+                  "https://openai.com/waitlist/gpt-4-api")
+            self.kwargs['model'] = "gpt-3.5-turbo"
 
     def _compose_message(self, role: str, content: str) -> dict:
         return {"role": role, "content": content}
@@ -72,7 +57,7 @@ class AI:
         ]
         return self.next(messages)
 
-    def next(self, messages: list, dbs: DBs, prompt=None) -> list:
+    def next(self, messages: list, prompt=None) -> list:
         if prompt:
             messages.append(self._compose_message("user", prompt))
 
@@ -94,10 +79,6 @@ class AI:
         return messages
 
 
-
-
-
-
 def parse_chat(chat: str) -> list:
     regex = r"```(.*?)```"
     matches = re.finditer(regex, chat, re.DOTALL)
@@ -108,6 +89,7 @@ def parse_chat(chat: str) -> list:
         files.append((path, "\n".join(code)))
 
     return files
+
 
 def to_files(chat: str, workspace: DB):
     workspace['all_output.txt'] = chat
@@ -128,20 +110,23 @@ def to_files(chat: str, workspace: DB):
         with open(full_path, 'w') as f:
             f.write(file_content)
 
+
 def setup_sys_prompt(dbs: DBs) -> str:
     return dbs.identity['setup'] + '\nUseful to know:\n' + dbs.identity['philosophy']
+
 
 def run(ai: AI, dbs: DBs):
     messages = ai.start(setup_sys_prompt(dbs), dbs.input['main_prompt'])
     to_files(messages[-1]['content'], dbs.workspace)
     return messages
 
+
 def clarify(ai: AI, dbs: DBs):
     messages = [ai._compose_message("system", dbs.identity['qa'])]
     user = dbs.input['main_prompt']
     end_phrases = ["okay i understood"]  # Add more end phrases as needed
     while True:
-        messages = ai.next(messages, dbs, user)
+        messages = ai.next(messages, user)
         if messages[-1]['content'].strip().lower() in end_phrases:
             print("Everything clear.")
             break
@@ -149,52 +134,47 @@ def clarify(ai: AI, dbs: DBs):
         if not user or user == 'x':
             break
         user += (
-           '\n\n'
-           'Is anything else unclear? If yes, only answer in the form:\n'
+            '\n\n'
+            'Is anything else unclear? If yes, only answer in the form:\n'
             '{remaining unclear areas} remaining questions.\n'
             '{Next question}\n'
             'If everything is sufficiently clear, only answer "okay I understood".'
-         )
+        )
     return messages
+
 
 def run_clarified(ai: AI, dbs: DBs):
     messages = json.loads(dbs.logs[clarify.__name__])
     messages = [ai._compose_message("system", setup_sys_prompt(dbs))] + messages[1:]
-    messages = ai.next(messages, dbs, dbs.identity['use_qa'])
+    messages = ai.next(messages, dbs.identity['use_qa']) # use 'use_qa' as prompt
     to_files(messages[-1]['content'], dbs.workspace)
     return messages
+
 
 STEPS = [clarify, run_clarified]
 
 app = typer.Typer()
 
+
 @app.command()
 def chat(
-    model: str = typer.Option("gpt-3.5-turbo", help="The model to be used by the AI."),
-    temperature: float = typer.Option(0.1, help="The temperature setting for the AI.")
+    model: str = typer.Option("gpt-4", help="The model to be used by the AI."),
+    temperature: float = typer.Option(0.1, help="The temperature setting for the AI."),
+    project_path: str = typer.Argument(".", help="Path to the project directory.")
 ):
     ai = AI(model=model, temperature=temperature)
+    project_path = pathlib.Path(project_path).absolute()
     dbs = DBs(
-        memory=DB(),
-        logs=DB(),
-        input=DB(),
-        workspace=DB(),
-        identity=DB(),
+        memory=DB(project_path / 'memory'),
+        logs=DB(project_path / 'logs'),
+        input=DB(project_path / 'input'),
+        workspace=DB(project_path / 'workspace'),
+        identity=DB(project_path / 'identity'),
     )
-
-    dbs.input.read_from_file('input.txt')
-    dbs.memory.read_from_file('memory.txt')
-    dbs.identity.read_from_file('identity.txt')
 
     for step in STEPS:
         messages = step(ai, dbs)
         dbs.logs[step.__name__] = json.dumps(messages)
-
-    # After all steps, write back the memory data to 'memory.txt'
-    dbs.memory.write_to_file('memory.txt')
-
-    # Write the logs data to 'logs.json'
-    dbs.logs.write_to_file('logs.json')
 
 
 if __name__ == "__main__":
